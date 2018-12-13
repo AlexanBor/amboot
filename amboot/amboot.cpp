@@ -18,7 +18,13 @@ namespace err
         dstSeek,    // Error getting dst size
         dstOpen,    // Error opening dst
         srcOpen,    // Error opening one of src images
-        space       // Not enough space on dst device
+        listOpen,   // Error opening images list
+        listLimit,  // Line length in images list ecxeeds limit
+        listLine,   // Cannot prse line in image list
+        emptyList,  // Error: no image files defined in list file
+    
+    
+    space       // Not enough space on dst device
     };
 };
 
@@ -101,14 +107,14 @@ public:
     static list<ImageReader *> factory(const char *listFileName)
     {
         ifstream listFile(listFileName);
-        bool ok = true;
+        err::status statusError = err::ok;
         list<ImageReader *> imageReaders;
 
         if (listFile.eof() || listFile.bad() || !listFile.is_open())
         {
             cerr << "Error opening images list " << listFileName << endl;
             listFile.close();
-            ok = false;
+            statusError = err::listOpen;
         }
         else
         { 
@@ -121,7 +127,7 @@ public:
                 if (listFile.fail())
                 {
                     cerr << "Error: listfile " << listFileName << " line " << lineNumber << " exceeds " << sizeof(line)-1 << " characters." << endl;
-                    ok = false;
+                    statusError = err::listLimit;
                     break;
                 }
                 if (line[0] == 0 || line[0] == '#')
@@ -132,7 +138,7 @@ public:
                 if (!toks)
                 {
                     cerr << "Error: listfile " << listFileName << " line " << lineNumber << " cannot parse line." << endl;
-                    ok = false;
+                    statusError = err::listLine;
                     break;
                 }
                 int size = atoi(toks);
@@ -140,36 +146,35 @@ public:
                 if (!name)
                 {
                     cerr << "Error: listfile " << listFileName << " line " << lineNumber << " cannot parse line. Empty imageFileName?" << endl;
-                    ok = false;
+                    statusError = err::listLine;
                     break;
                 }
                 toks = strtok(NULL, " ");
                 if (toks)
                 {
                     cerr << "Error: listfile " << listFileName << " line " << lineNumber << " cannot parse line. Space in imageFileName?" << endl;
-                    ok = false;
+                    statusError = err::listLine;
                     break;
                 }
 #ifndef NDEBUG
                 cerr << "Info:" << lineNumber << ":" << size << " <<" << name << ">>" << endl;
 #endif
                 auto reader = new ImageReader(size, name);
-                if (! reader->ok())
+                if (statusError = reader->error())
                 {
                     delete reader;
-                    ok = false;
                     break;
                 }
                 imageReaders.push_back(reader);
             }
             if (imageReaders.size() == 0)
             {
-                ok = false;
                 cerr << "Error: no image files defined in " << listFileName << endl;
+                statusError = err::emptyList;
             }
         }
 
-        if (!ok)
+        if (statusError)
         {
             clear(imageReaders);
             imageReaders.clear();
