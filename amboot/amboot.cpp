@@ -1,15 +1,19 @@
 #include <fstream>
 #include <iostream>
 #include <list>
-#include <string.h>
 #include <memory>
+#include <string.h>
+#include <unistd.h>
 
 using namespace std;
 
-const int HEADER_SIZE = 32768; // Size of MBR+partition list 
-const int BYTES_TO_GIB = 30; // Gibi = 2**30 https://en.wikipedia.org/wiki/Binary_prefix
-const int SECTOR_SIZE = 512;
-const int BUFFER_SIZE = 1024 * 1024; // 1 Mibi byte
+constexpr unsigned int HEADER_SIZE = 32768; // Size of MBR+partition list 
+constexpr unsigned int BYTES_TO_GIB = 30;   // Gibi = 2**30 https://en.wikipedia.org/wiki/Binary_prefix
+constexpr unsigned int SECTOR_SIZE = 512;
+constexpr unsigned int BYTES_TO_SECTORS = 9;//  SECTOR_SIZE = 2**9
+constexpr unsigned int BUFFER_SIZE = 1024 * 1024; // 1 Mibi byte
+constexpr unsigned int SECTORS_PER_GiB = 1024 * 1024 * 1024 / SECTOR_SIZE;
+constexpr uint8_t MAGIC_XBR = 0x42;
 
 #pragma pack(push, 1)
 //{
@@ -35,7 +39,7 @@ struct MasterBootRecord
     PartitionMBR partition[4];
     uint16_t mbr_signature;
 };
-struct ExtBootRecord
+struct ExtBootRecord // Used only to store SECTOR_SIZE of MAGIC_XBR bytes
 {
     char code[440];
     uint32_t disk_signature;
@@ -43,11 +47,20 @@ struct ExtBootRecord
     PartitionMBR partition[4];
     uint16_t mbr_signature;
 };
+struct ImageInfo
+{
+    uint32_t firstSectorLBA;
+    uint32_t sectorsCountLBA;
+    uint32_t part0firstSectorLBA;
+    uint32_t reserved_;
+    char imageName[SECTOR_SIZE - 4 * sizeof(uint32_t)];
+};
+constexpr int MAX_IMAGECOUNT = (HEADER_SIZE - sizeof(ExtBootRecord) - sizeof(ExtBootRecord)) / sizeof(ImageInfo);
 struct DiskHeader
 {
     MasterBootRecord mbr;
     ExtBootRecord xbr;
-    char images[32768-1024];
+    ImageInfo images[MAX_IMAGECOUNT];
 };
 // check sizes and alignments at compile time
 inline void check_struct()
@@ -67,6 +80,17 @@ inline void check_struct()
 //}
 #pragma pack(pop)
 
+void fillImageName(char *dst, const char *src, size_t size)
+{
+    const char *lastPos = strrchr(src, '/');
+    if (lastPos)
+    {
+        src = lastPos+1;
+    }
+    strncpy(dst, src, size - 1);
+    dst[size - 1] = 0;
+}
+
 namespace err
 {
     enum status
@@ -78,24 +102,36 @@ namespace err
         srcOpen,    // Error opening one of src images
         listOpen,   // Error opening images list
         listLimit,  // Line length in images list ecxeeds limit
-        listLine,   // Cannot prse line in image list
+        listLine,   // Cannot parse line in image list
         emptyList,  // Error: no image files defined in list file
         imageToBig, // Image file doesn't fit in requested size
         dstFail,    // Fail writing dst device
         byteorder,  // Compile and run only on little-endian byteorder!
+        dstRead,    // Error reading dst device
+        dstFlush,   // Error flushing dst device
+        increase,   // Error: increase size for partition # name
+        imageCount, // Error: MAX_IMAGECOUNT exceeded      
+        noActive,   // Error: no active partition selected.
+        noMagic,    // ExtBootRecord xbr contains no expected magic
+        emptyBoot,  // Error: No images found on device
+        mbrMagic,   // Error: no magic in mbr of image
+        imageNum,   // Error: image number is greater then count of images
         space       // Not enough space on dst device
     };
 };
 
-class ImageWriter
+class ImageKeeper
 {
 public:
-    ImageWriter(const char *deviceName);
+    ImageKeeper(const char *deviceName, bool preview_);
     err::status error() const
     {
         return statusError;
     }
     err::status write(istream &image, const string &imageName, int imageSizeGiB);
+    err::status saveBoot(unsigned bootNumber);
+    err::status readBoot();
+    err::status print();
     streampos getSize() const
     {
         return size;
@@ -103,6 +139,10 @@ public:
 private:
     void write(const char *buffer, streamsize size)
     {
+        if (preview)
+        {
+            return;
+        }
         device.write(buffer, size);
         if (device.fail())
         {
@@ -110,20 +150,40 @@ private:
             cerr << "Error: fail wrining image to " << name << "." << endl;
         }
     }
-
+    void read(char *buffer, streamsize size)
+    {
+        device.read(buffer, size);
+        if (device.fail())
+        {
+            cerr << "Error reading dst device " << name << endl;
+            statusError = err::dstRead;
+        }
+    }
+    void seek(ios::streamoff offset, ios_base::seekdir dir)
+    {
+        device.seekp(offset, dir);
+        if (device.fail())
+        {
+            cerr << "Error seeking dst device " << name << endl;
+            statusError = err::dstSeek;
+        }
+    }
     err::status statusError;
     int imagesCount;
+    bool preview;
     streampos size; // size of device in bytes
     string name;
-    ofstream device;
+    fstream device;
+    DiskHeader hdr;
 };
 
-ImageWriter::ImageWriter(const char *deviceName):
+ImageKeeper::ImageKeeper(const char *deviceName, bool preview_):
     statusError(err::ok),
     imagesCount(0),
+    preview(preview_),
     size(0),
     name(deviceName),
-    device(deviceName)
+    device(deviceName, (preview_ ? ios::in : (ios::out | ios::in)) | ios::binary)
 {
     if (device.eof() || device.bad() || !device.is_open())
     {
@@ -132,12 +192,16 @@ ImageWriter::ImageWriter(const char *deviceName):
     }
     else
     {
-        size = device.seekp(0, ios::end).tellp();
-        device.seekp(0, ios::beg);
-        if (device.fail())
+        seek(0, ios::end);
+        if (statusError)
         {
-            cerr << "Error seeking dst device " << name << endl;
-            statusError = err::dstSeek;
+            return;
+        }
+        size = device.tellp();
+        seek(HEADER_SIZE, ios::beg);
+        if (statusError)
+        {
+            return;
         }
     }
     if (statusError)
@@ -146,15 +210,41 @@ ImageWriter::ImageWriter(const char *deviceName):
     }
 }
 
-err::status ImageWriter::write(istream &image, const string &imageName, int imageSizeGiB)
+err::status ImageKeeper::write(istream &image, const string &imageName, int imageSizeGiB)
 {
     unique_ptr<char> buffer(new char[BUFFER_SIZE]);
-    streamsize imageSizeBytes = streamsize(imageSizeGiB) << BYTES_TO_GIB; // Size in bytes of dst image/partition
+    streamsize imageSizeBytes = streamsize(imageSizeGiB) << BYTES_TO_GIB; // Size in bytes of current image/partition
     streamsize totalCount = 0;
+
+    hdr.images[imagesCount].firstSectorLBA = imagesCount ? hdr.images[imagesCount-1].firstSectorLBA + hdr.images[imagesCount-1].sectorsCountLBA : HEADER_SIZE >> BYTES_TO_SECTORS;
+    hdr.images[imagesCount].sectorsCountLBA = imageSizeGiB << (BYTES_TO_GIB - BYTES_TO_SECTORS);
+    fillImageName(hdr.images[imagesCount].imageName, imageName.c_str(), sizeof(hdr.images[imagesCount].imageName));
+
+    bool mbrCalculated = false;
+
+    bool showProgress = isatty(1); // 0=stdin 1=stdout 2=stderr
+
+    cout << "Info: writing " << imageName << endl << imageSizeBytes << " bytes total." << endl;
 
     while (image.read(buffer.get(), BUFFER_SIZE))
     {
         streamsize countRead = image.gcount();
+
+        if (!mbrCalculated)
+        {
+            MasterBootRecord &mbr = *(MasterBootRecord *)buffer.get();
+            auto newSectorsCountLBA = (imageSizeBytes >> BYTES_TO_SECTORS) - mbr.partition[1].firstSectorLBA;
+            if (mbr.partition[1].sectorsCountLBA > newSectorsCountLBA)
+            {
+                int requiredGiB = (mbr.partition[1].sectorsCountLBA + mbr.partition[1].firstSectorLBA - 1 + SECTORS_PER_GiB) / SECTORS_PER_GiB;
+                cerr << "Error: size of image " << imageName << " #" << imagesCount+1 << " requires at least " << requiredGiB << "GiB" << endl;
+                statusError = err::increase;
+                return statusError;
+            }
+            hdr.images[imagesCount].part0firstSectorLBA = mbr.partition[0].firstSectorLBA;
+            mbr.partition[1].sectorsCountLBA = newSectorsCountLBA;
+            mbrCalculated = true;
+        }
 
         totalCount += countRead;
 
@@ -171,6 +261,11 @@ err::status ImageWriter::write(istream &image, const string &imageName, int imag
             return statusError;
         }
 
+        if (showProgress)
+        {
+            cout << totalCount << '\r';
+            cout.flush();
+        }
         if (countRead < BUFFER_SIZE)
         {
             break;
@@ -180,10 +275,16 @@ err::status ImageWriter::write(istream &image, const string &imageName, int imag
     memset(buffer.get(), 0, BUFFER_SIZE);
     while (totalCount < imageSizeBytes - BUFFER_SIZE)
     {
-        device.write(buffer.get(), BUFFER_SIZE);
+        write(buffer.get(), BUFFER_SIZE);
+        totalCount += BUFFER_SIZE;
         if (statusError)
         {
             return statusError;
+        }
+        if (showProgress)
+        {
+            cout << totalCount << '\r';
+            cout.flush();
         }
     }
     write(buffer.get(), imageSizeBytes - totalCount);
@@ -191,10 +292,134 @@ err::status ImageWriter::write(istream &image, const string &imageName, int imag
     {
         return statusError;
     }
-    
+    if (showProgress)
+    {
+        cout << '\r' << "Write completed." << endl;
+        cout.flush();
+    }
+
     imagesCount++; // increment count only if success
     return statusError;
 }
+err::status ImageKeeper::print()
+{
+    int activeNumber = 0;
+    for (int i = 0; i < imagesCount; i++)
+    {
+        char isActive = ' ';
+        if (hdr.mbr.partition[0].firstSectorLBA == hdr.images[i].firstSectorLBA + hdr.images[i].part0firstSectorLBA)
+        {
+            isActive = '*';
+            activeNumber = i + 1;
+        }
+        cout << isActive << ' ' << i+1 << ": " << hdr.images[i].imageName << endl;
+    }
+    if (hdr.mbr.partition[0].firstSectorLBA == 0 && hdr.mbr.mbr_signature == 0) // MBR is zeroed
+    {
+        cout << "MBR is zeroed" << endl;
+    }
+    else if (activeNumber)
+    {
+        cout << "* - active partition " << activeNumber << endl;
+    }
+    else
+    {
+        cout << "First MBR partition points outside." << endl;
+        cerr << "Error: no active partition selected in MBR." << endl;
+        statusError = err::noActive;
+    }
+    return statusError;
+}
+err::status ImageKeeper::saveBoot(unsigned bootNumber)
+{
+    memset(&hdr.xbr, MAGIC_XBR, sizeof(hdr.xbr));
+    if (bootNumber > imagesCount)
+    {
+        cerr << "Error: image number is greater then count of images on device " << name << endl;
+        return (statusError = err::dstSeek);
+    }
+    bootNumber--;
+    seek(hdr.images[bootNumber].firstSectorLBA << BYTES_TO_SECTORS, ios::beg);
+    if (statusError)
+    {
+        return statusError;
+    }
+    if (preview)
+    {
+        return statusError;
+    }
+    read((char *)&hdr.mbr, sizeof(hdr.mbr));
+    if (statusError)
+    {
+        return statusError;
+    }
+    if (hdr.mbr.mbr_signature != 0xAA55)
+    {
+        cerr << "Error: no magic in mbr of image " << bootNumber+1 << ' ' << hdr.images[bootNumber].imageName << endl;
+        return (statusError = err::mbrMagic);
+    }
+
+    hdr.mbr.partition[0].firstSectorLBA += hdr.images[bootNumber].firstSectorLBA;
+    hdr.mbr.partition[1].firstSectorLBA += hdr.images[bootNumber].firstSectorLBA;
+    hdr.mbr.partition[2].firstSectorLBA = (HEADER_SIZE >> BYTES_TO_SECTORS);
+    hdr.mbr.partition[2].sectorsCountLBA = hdr.images[imagesCount-1].sectorsCountLBA + hdr.images[imagesCount-1].firstSectorLBA - (HEADER_SIZE >> BYTES_TO_SECTORS);
+    hdr.mbr.partition[2].partition_type = 0x1F;
+
+    seek(0, ios::beg);
+    if (statusError)
+    {
+        cerr << "Error seeking dst device " << name << endl;
+        return (statusError = err::dstSeek);
+    }
+    write((char *)&hdr, sizeof(hdr));
+    if (!statusError)
+    {
+        device.flush();
+    }
+    if (device.fail())
+    {
+        cerr << "Error flushing dst device " << name << endl;
+        return (statusError = err::dstFlush);
+    }
+    return statusError;
+}
+err::status ImageKeeper::readBoot()
+{
+    seek(0, ios::beg);
+    if (statusError)
+    {
+        return statusError;
+    }
+    read((char *)&hdr, sizeof(hdr));
+    if (statusError)
+    {
+        return statusError;
+    }
+    
+    for (int i = 0; i < sizeof(hdr.xbr); i++)
+        if (((char *)&hdr.xbr)[i] != MAGIC_XBR)
+        {
+            cerr << "Error: ExtBootRecord xbr contains no expected magic." << endl;
+            statusError = err::noMagic;
+            return statusError;
+        }
+
+    for (; imagesCount < MAX_IMAGECOUNT; imagesCount++)
+    {
+        if (hdr.images[imagesCount].firstSectorLBA == 0)
+            break;
+    }
+
+    if (imagesCount <= 0)
+    {
+        cerr << "Error: No images found on device " << name << endl;
+        statusError = err::emptyBoot;
+        return statusError;
+    }
+
+    return statusError;
+}
+
 
 class ImageReader
 {
@@ -248,7 +473,7 @@ public:
     {
         clear();
     }
-    list <ImageReader *>items()
+    list <ImageReader *> &items()
     {
         return images;
     }
@@ -273,7 +498,6 @@ ImageList::ImageList(const char *listFileName):
     statusError(err::ok)
 {
     ifstream listFile(listFileName, ios::in | ios::binary);
-    list<ImageReader *> imageReaders;
 
     if (listFile.eof() || listFile.bad() || !listFile.is_open())
     {
@@ -291,8 +515,11 @@ ImageList::ImageList(const char *listFileName):
             lineNumber++;
             if (listFile.fail())
             {
-                cerr << "Error: listfile " << listFileName << " line " << lineNumber << " exceeds " << sizeof(line) - 1 << " characters." << endl;
-                statusError = err::listLimit;
+                if (!listFile.eof())
+                {
+                    cerr << "Error: listfile " << listFileName << " line " << lineNumber << " exceeds " << sizeof(line) - 1 << " characters." << endl;
+                    statusError = err::listLimit;
+                }
                 break;
             }
             if (line[0] == 0 || line[0] == '#')
@@ -321,8 +548,8 @@ ImageList::ImageList(const char *listFileName):
                 statusError = err::listLine;
                 break;
             }
-#ifndef NDEBUG
-            cerr << "Info:" << lineNumber << ":" << size << " <<" << name << ">>" << endl;
+#if 0 // #ifndef NDEBUG
+            cout << "Info:" << lineNumber << ":" << size << " <<" << name << ">>" << endl;
 #endif
             auto reader = new ImageReader(size, name);
             if ((statusError = reader->error()))
@@ -330,12 +557,17 @@ ImageList::ImageList(const char *listFileName):
                 delete reader;
                 break;
             }
-            imageReaders.push_back(reader);
+            images.push_back(reader);
         }
-        if (imageReaders.size() == 0)
+        if (images.size() == 0)
         {
             cerr << "Error: no image files defined in " << listFileName << endl;
             statusError = err::emptyList;
+        }
+        else if (images.size() > MAX_IMAGECOUNT)
+        {
+            cerr << "Error: image count is " << images.size() << " in " << listFileName << ". Limit is " << MAX_IMAGECOUNT << endl;
+            statusError = err::imageCount;
         }
     }
 
@@ -345,29 +577,39 @@ ImageList::ImageList(const char *listFileName):
     }
 }
 
-err::status performBuild(const char *dstDevice, const char *listFileName)
+err::status performBuild(const char *dstDevice, const char *listFileName, bool preview, unsigned bootNumber)
 {
-    ImageWriter w(dstDevice);
+    err::status statusError = err::ok;
+
+    ImageList imageList(listFileName);
+    if (imageList.error())
+    {
+        return imageList.error();
+    }
+
+    if (bootNumber > imageList.items().size())
+    {
+        cerr << "Error: image number is greater then count of images on device " << dstDevice << endl;
+        return (statusError = err::dstSeek);
+    }
+
+    ImageKeeper w(dstDevice, preview);
     if (w.error())
     {
         return w.error();
     }
-
-    err::status statusError = err::ok;
-
-    ImageList imageList(listFileName);
 
     { // Check there is enough space on dst drive for all extended images and MBS
         int requiredGiB = 0;
         for (auto reader : imageList.items())
         {
             requiredGiB += reader->getSizeGiB();
-            if (streampos(requiredGiB) > ((w.getSize() - streampos(HEADER_SIZE)) >> BYTES_TO_GIB))
-            {
-                statusError = err::space;
-                cerr << "Error: not enough space. Dst available:" << ((w.getSize() - streampos(HEADER_SIZE)) >> BYTES_TO_GIB) << "GiB. Required:" << requiredGiB << "GiB." << endl ;
-                imageList.clear();
-            }
+        }
+        if (streampos(requiredGiB) > ((w.getSize() - streampos(HEADER_SIZE)) >> BYTES_TO_GIB))
+        {
+            cerr << "Error: not enough space. Dst available:" << ((w.getSize() - streampos(HEADER_SIZE)) >> BYTES_TO_GIB) << "GiB. Required:" << requiredGiB << "GiB." << endl;
+            imageList.clear();
+            return err::space;
         }
     }
 
@@ -377,30 +619,50 @@ err::status performBuild(const char *dstDevice, const char *listFileName)
         if (statusError)
             break;
     }
+    if (!statusError)
+    {
+        statusError = w.saveBoot(bootNumber);
+    }
     return statusError;
 }
 
 err::status performList(const char *device)
 {
+    ImageKeeper w(device, true); // Simulate preview mode to avoid disk write
 
-    return err::ok;
+    if (w.error() ||
+        w.readBoot())
+    {
+        return w.error();
+    }
+
+    return w.print();
 }
 
-err::status performSwitch(const char *device, const char *itemNum)
+err::status performSwitch(const char *device, unsigned bootNumber)
 {
+    ImageKeeper w(device, false);
 
-    return err::ok;
+    if (w.error() ||
+        w.readBoot())
+    {
+        return w.error();
+    }
+
+    return w.saveBoot(bootNumber);
 }
 
 void printUsage()
 {
     cerr << "Usage is:" << endl
-        << "\tamboot b /dev/sd? /full/path/to/imagelistfile" << endl
-        << "\t\tbuild on specified device" << endl
+        << "\tamboot b /dev/sd? /full/path/to/imagelistfile [bootNumber]" << endl
+        << "\t\tbuild on specified device and set boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << endl
+        << "\tamboot p /dev/sd? /full/path/to/imagelistfile [bootNumber]" << endl
+        << "\t\tpreview: simulate b_uild without actually write to device" << endl
         << "\tamboot l /dev/sd?" << endl
         << "\t\tlist image chain on specified device" << endl
-        << "\tamboot s /dev/sd? #" << endl
-        << "\t\tswitch to target image # (1...) on specified device /dev/sd? (/dev/sda...)"
+        << "\tamboot s /dev/sd? bootNumber" << endl
+        << "\t\tset boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << " on specified device /dev/sd? (/dev/sda...)"
         << endl << endl;
 }
 
@@ -411,6 +673,9 @@ bool isLittleEndian()
     return (*ptr == 1);
 }
 
+// p /dev/sdc /home/vagrant/amboot/list.txt
+// l /dev/sdc
+// s /dev/sdc 1 
 int main(int argc, char **argv)
 {
     if (!isLittleEndian())
@@ -424,14 +689,24 @@ int main(int argc, char **argv)
         printUsage();
         return err::cmdLine;
     }
-    if (!strcmp(argv[1], "b"))
+    if (!strcmp(argv[1], "b") || !strcmp(argv[1], "p"))
     {
-        if (argc != 4)
+        unsigned bootNumber = 1;
+        if (argc == 5)
+        {
+            bootNumber = atoi(argv[4]);
+            if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+            {
+                printUsage();
+                return err::cmdLine;
+            }
+        }
+        else if (argc != 4)
         {
             printUsage();
             return err::cmdLine;
         }
-        returnStatus = performBuild(argv[2], argv[3]);
+        returnStatus = performBuild(argv[2], argv[3], argv[1][0] == 'p' ? true : false, bootNumber);
     }
     else if (!strcmp(argv[1], "l"))
     {
@@ -449,7 +724,13 @@ int main(int argc, char **argv)
             printUsage();
             return err::cmdLine;
         }
-        returnStatus = performSwitch(argv[2], argv[3]);
+        unsigned bootNumber = atoi(argv[3]);
+        if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+        {
+            printUsage();
+            return err::cmdLine;
+        }
+        returnStatus = performSwitch(argv[2], bootNumber);
     }
     else
     {
@@ -459,4 +740,3 @@ int main(int argc, char **argv)
 
     return returnStatus;
 }
-
