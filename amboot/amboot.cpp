@@ -55,14 +55,14 @@ struct ImageInfo
     uint32_t reserved_;
     char imageName[SECTOR_SIZE - 4 * sizeof(uint32_t)];
 };
-constexpr int MAX_IMAGECOUNT = (HEADER_SIZE - sizeof(ExtBootRecord) - sizeof(ExtBootRecord)) / sizeof(ImageInfo);
+constexpr size_t MAX_IMAGECOUNT = (HEADER_SIZE - sizeof(ExtBootRecord) - sizeof(ExtBootRecord)) / sizeof(ImageInfo);
 struct DiskHeader
 {
     MasterBootRecord mbr;
     ExtBootRecord xbr;
     ImageInfo images[MAX_IMAGECOUNT];
 };
-// check sizes and alignments at compile time
+// check sizes and alignments at compile time:
 inline void check_struct()
 {
     switch (0)
@@ -96,19 +96,19 @@ namespace err
     enum status
     {
         ok = 0,     // Everything is OK, no error
+        byteorder,  // Compile and run only on little-endian byteorder!
         cmdLine,    // Wrong command line
-        dstSeek,    // Error getting dst size
         dstOpen,    // Error opening dst
-        srcOpen,    // Error opening one of src images
+        dstSeek,    // Error getting dst size
+        dstFail,    // Fail writing dst device
+        dstRead,    // Error reading dst device
+        dstFlush,   // Error flushing dst device
         listOpen,   // Error opening images list
         listLimit,  // Line length in images list ecxeeds limit
         listLine,   // Cannot parse line in image list
+        srcOpen,    // Error opening one of src images
         emptyList,  // Error: no image files defined in list file
         imageToBig, // Image file doesn't fit in requested size
-        dstFail,    // Fail writing dst device
-        byteorder,  // Compile and run only on little-endian byteorder!
-        dstRead,    // Error reading dst device
-        dstFlush,   // Error flushing dst device
         increase,   // Error: increase size for partition # name
         imageCount, // Error: MAX_IMAGECOUNT exceeded      
         noActive,   // Error: no active partition selected.
@@ -169,14 +169,13 @@ private:
         }
     }
     err::status statusError;
-    int imagesCount;
+    unsigned imagesCount;
     bool preview;
     streampos size; // size of device in bytes
     string name;
     fstream device;
     DiskHeader hdr;
 };
-
 ImageKeeper::ImageKeeper(const char *deviceName, bool preview_):
     statusError(err::ok),
     imagesCount(0),
@@ -185,6 +184,7 @@ ImageKeeper::ImageKeeper(const char *deviceName, bool preview_):
     name(deviceName),
     device(deviceName, (preview_ ? ios::in : (ios::out | ios::in)) | ios::binary)
 {
+    memset(&hdr, 0, sizeof(hdr));
     if (device.eof() || device.bad() || !device.is_open())
     {
         cerr << "Error opening dst device " << name << endl;
@@ -209,7 +209,6 @@ ImageKeeper::ImageKeeper(const char *deviceName, bool preview_):
         device.close();
     }
 }
-
 err::status ImageKeeper::write(istream &image, const string &imageName, int imageSizeGiB)
 {
     unique_ptr<char> buffer(new char[BUFFER_SIZE]);
@@ -304,7 +303,7 @@ err::status ImageKeeper::write(istream &image, const string &imageName, int imag
 err::status ImageKeeper::print()
 {
     int activeNumber = 0;
-    for (int i = 0; i < imagesCount; i++)
+    for (unsigned i = 0; i < imagesCount; i++)
     {
         char isActive = ' ';
         if (hdr.mbr.partition[0].firstSectorLBA == hdr.images[i].firstSectorLBA + hdr.images[i].part0firstSectorLBA)
@@ -396,17 +395,16 @@ err::status ImageKeeper::readBoot()
         return statusError;
     }
     
-    for (int i = 0; i < sizeof(hdr.xbr); i++)
+    for (size_t i = 0; i < sizeof(hdr.xbr); i++)
         if (((char *)&hdr.xbr)[i] != MAGIC_XBR)
         {
             cerr << "Error: ExtBootRecord xbr contains no expected magic." << endl;
-            statusError = err::noMagic;
-            return statusError;
+            return (statusError = err::noMagic);
         }
 
-    for (; imagesCount < MAX_IMAGECOUNT; imagesCount++)
+    for (imagesCount = 0; imagesCount < MAX_IMAGECOUNT; imagesCount++)
     {
-        if (hdr.images[imagesCount].firstSectorLBA == 0)
+        if (hdr.images[imagesCount].firstSectorLBA == 0) // looks like this image is zeroed ie empty
             break;
     }
 
@@ -419,7 +417,6 @@ err::status ImageKeeper::readBoot()
 
     return statusError;
 }
-
 
 class ImageReader
 {
@@ -447,7 +444,6 @@ private:
     string name;
     ifstream image;
 };
-
 ImageReader::ImageReader(int size_, const char *fileName):
     statusError(err::ok),
     size(size_),
@@ -493,7 +489,6 @@ private:
     list <ImageReader *>images;
     err::status statusError;
 };
-
 ImageList::ImageList(const char *listFileName):
     statusError(err::ok)
 {
@@ -673,6 +668,17 @@ bool isLittleEndian()
     return (*ptr == 1);
 }
 
+unsigned getBootNumber(const char *num)
+{
+    unsigned bootNumber = (unsigned)atol(num);
+    if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+    {
+        printUsage();
+        return 0;
+    }
+    return bootNumber;
+}
+
 // p /dev/sdc /home/vagrant/amboot/list.txt
 // l /dev/sdc
 // s /dev/sdc 1 
@@ -684,20 +690,21 @@ int main(int argc, char **argv)
         return err::byteorder;
     }
     err::status returnStatus = err::ok;
-    if (argc <= 1)
+    if (argc <= 1 || argv[1][1] != 0)
     {
         printUsage();
         return err::cmdLine;
     }
-    if (!strcmp(argv[1], "b") || !strcmp(argv[1], "p"))
+    unsigned bootNumber = 1;
+    switch (argv[1][0])
     {
-        unsigned bootNumber = 1;
+    case 'p':
+    case 'b':
         if (argc == 5)
         {
-            bootNumber = atoi(argv[4]);
-            if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+            bootNumber = getBootNumber(argv[4]);
+            if (bootNumber < 1)
             {
-                printUsage();
                 return err::cmdLine;
             }
         }
@@ -707,33 +714,29 @@ int main(int argc, char **argv)
             return err::cmdLine;
         }
         returnStatus = performBuild(argv[2], argv[3], argv[1][0] == 'p' ? true : false, bootNumber);
-    }
-    else if (!strcmp(argv[1], "l"))
-    {
+        break;
+    case 'l':
         if (argc != 3)
         {
             printUsage();
             return err::cmdLine;
         }
         returnStatus = performList(argv[2]);
-    }
-    else if (!strcmp(argv[1], "s"))
-    {
+        break;
+    case 's':
         if (argc != 4)
         {
             printUsage();
             return err::cmdLine;
         }
-        unsigned bootNumber = atoi(argv[3]);
-        if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+        bootNumber = atoi(argv[3]);
+        if (bootNumber < 1)
         {
-            printUsage();
             return err::cmdLine;
         }
         returnStatus = performSwitch(argv[2], bootNumber);
-    }
-    else
-    {
+        break;
+    default:
         printUsage();
         return err::cmdLine;
     }
