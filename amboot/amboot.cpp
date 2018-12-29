@@ -335,7 +335,7 @@ err::status ImageKeeper::saveBoot(unsigned bootNumber)
     if (bootNumber > imagesCount)
     {
         cerr << "Error: image number is greater then count of images on device " << name << endl;
-        return (statusError = err::dstSeek);
+        return (statusError = err::imageNum);
     }
     bootNumber--;
     seek(hdr.images[bootNumber].firstSectorLBA << BYTES_TO_SECTORS, ios::beg);
