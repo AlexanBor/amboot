@@ -1,0 +1,14 @@
+#Empty lines or lines started with # are ignored.
+#Tab symbols not allowed
+#Sample of string Num<space>/path/to/file.img
+#Num - total size of partitions in Gibi bytes for new OS
+#/path/to/file.img - absolute or relative path to OS image
+#Images are provided and discussed on
+#https://forum.armbian.com/topic/2419-armbian-for-amlogic-s905-and-s905x-ver-544/
+#https://forum.armbian.com/topic/7930-armbian-for-amlogic-s9xxx-kernel-41x-ver-555/
+8 /home/vagrant/amboot/Armbian_5.67_Aml-s9xxx_Debian_stretch_default_4.19.7_20181218.img
+8 /home/vagrant/amboot/Armbian_5.67_Aml-s9xxx_Ubuntu_bionic_default_4.19.7_20181218.img
+#31 /home/vagrant/amboot/Armbian_5.67_Aml-s9xxx_Debian_stretch_default_4.19.6_20181207.img
+
+#32 /home/vagrant/amboot/Armbian_5.67_Aml-s9xxx_Debian_stretch_default_4.19.6_20181207.img
+#33 /home/vagrant/amboot/Armbian_5.67_Aml-s9xxx_Debian_stretch_default_4.19.6_20181207.img  
