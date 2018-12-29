@@ -649,16 +649,16 @@ err::status performSwitch(const char *device, unsigned bootNumber)
 
 void printUsage()
 {
-    cerr << "Usage is:" << endl
-        << "\tamboot b /dev/sd? /full/path/to/imagelistfile [bootNumber]" << endl
-        << "\t\tbuild on specified device and set boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << endl
-        << "\tamboot p /dev/sd? /full/path/to/imagelistfile [bootNumber]" << endl
-        << "\t\tpreview: simulate b_uild without actually write to device" << endl
-        << "\tamboot l /dev/sd?" << endl
-        << "\t\tlist image chain on specified device" << endl
-        << "\tamboot s /dev/sd? bootNumber" << endl
-        << "\t\tset boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << " on specified device /dev/sd? (/dev/sda...)"
-        << endl << endl;
+    cerr << "Usage is:\n"
+           "\tamboot b /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
+           "\t\tbuild on specified device and set boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << "\n"
+           "\tamboot p /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
+           "\t\tpreview: simulate b_uild without actually write to device\n"
+           "\tamboot l /dev/sd?\n"
+           "\t\tlist image chain on specified device\n"
+           "\tamboot s /dev/sd? bootNumber\n"
+           "\t\tset boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << " on specified device /dev/sd? (/dev/sda...)\n"
+           << endl;
 }
 
 bool isLittleEndian()
