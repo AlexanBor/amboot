@@ -8,8 +8,8 @@ FILEFLAG=${FILEDIR}/resize_second_stage
 temp_dir=$(mktemp -d)
 
 for IMAGE in `seq 1 ${IMAGESCOUNT}` ; do
-  mount ${PART} $temp_dir
   amboot s ${HDD} ${IMAGE}
+  mount ${PART} $temp_dir
   mkdir ${temp_dir}${FILEDIR}
   touch ${temp_dir}${FILEFLAG}
   ls -l ${temp_dir}${FILEFLAG}
