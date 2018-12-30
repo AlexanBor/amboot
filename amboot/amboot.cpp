@@ -14,6 +14,7 @@ constexpr unsigned int BYTES_TO_SECTORS = 9;//  SECTOR_SIZE = 2**9
 constexpr unsigned int BUFFER_SIZE = 1024 * 1024; // 1 Mibi byte
 constexpr unsigned int SECTORS_PER_GiB = 1024 * 1024 * 1024 / SECTOR_SIZE;
 constexpr uint8_t MAGIC_XBR = 0x42;
+constexpr int16_t MAGIC_MBR = (int16_t)0xAA55;
 
 #pragma pack(push, 1)
 //{
@@ -91,6 +92,16 @@ void fillImageName(char *dst, const char *src, size_t size)
     dst[size - 1] = 0;
 }
 
+unsigned getSize(const char *sizeStr)
+{
+    char *endptr;
+    unsigned long size = strtoul(sizeStr, &endptr, 10);
+    if (size < 1 || size > __UINT32_MAX__ || *endptr != 0)
+    {
+        return 0;
+    }
+    return (unsigned)size;
+}
 namespace err
 {
     enum status
@@ -241,7 +252,7 @@ err::status ImageKeeper::write(istream &image, const string &imageName, int imag
                 return statusError;
             }
             hdr.images[imagesCount].part0firstSectorLBA = mbr.partition[0].firstSectorLBA;
-            mbr.partition[1].sectorsCountLBA = newSectorsCountLBA;
+            mbr.partition[1].sectorsCountLBA = (uint32_t)newSectorsCountLBA;
             mbrCalculated = true;
         }
 
@@ -352,7 +363,7 @@ err::status ImageKeeper::saveBoot(unsigned bootNumber)
     {
         return statusError;
     }
-    if (hdr.mbr.mbr_signature != 0xAA55)
+    if (hdr.mbr.mbr_signature != MAGIC_MBR)
     {
         cerr << "Error: no magic in mbr of image " << bootNumber+1 << ' ' << hdr.images[bootNumber].imageName << endl;
         return (statusError = err::mbrMagic);
@@ -528,7 +539,13 @@ ImageList::ImageList(const char *listFileName):
                 statusError = err::listLine;
                 break;
             }
-            int size = atoi(toks);
+            unsigned size = getSize(toks);
+            if (size == 0)
+            {
+                cerr << "Error: listfile " << listFileName << " line " << lineNumber << ". Incorrect size." << endl;
+                statusError = err::listLine;
+                break;
+            }
             char *name = strtok(NULL, " ");
             if (!name)
             {
@@ -585,7 +602,7 @@ err::status performBuild(const char *dstDevice, const char *listFileName, bool p
     if (bootNumber > imageList.items().size())
     {
         cerr << "Error: image number is greater then count of images on device " << dstDevice << endl;
-        return (statusError = err::dstSeek);
+        return err::imageNum;
     }
 
     ImageKeeper w(dstDevice, preview);
@@ -650,15 +667,15 @@ err::status performSwitch(const char *device, unsigned bootNumber)
 void printUsage()
 {
     cerr << "Usage is:\n"
-           "\tamboot b /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
-           "\t\tbuild on specified device and set boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << "\n"
-           "\tamboot p /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
-           "\t\tpreview: simulate b_uild without actually write to device\n"
-           "\tamboot l /dev/sd?\n"
-           "\t\tlist image chain on specified device\n"
-           "\tamboot s /dev/sd? bootNumber\n"
-           "\t\tset boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << " on specified device /dev/sd? (/dev/sda...)\n"
-           << endl;
+            "amboot b /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
+            "\tbuild on specified device and set boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << "\n"
+            "amboot p /dev/sd? /full/path/to/imagelistfile [bootNumber]\n"
+            "\tpreview: simulate b_uild without actually write to device\n"
+            "amboot l /dev/sd?\n"
+            "\tlist image chain on specified device\n"
+            "amboot s /dev/sd? bootNumber\n"
+            "\tset boot image to bootNumber, 1 to " << MAX_IMAGECOUNT << " on specified device /dev/sd? (/dev/sda...)\n"
+         << endl;
 }
 
 bool isLittleEndian()
@@ -670,13 +687,14 @@ bool isLittleEndian()
 
 unsigned getBootNumber(const char *num)
 {
-    unsigned bootNumber = (unsigned)atol(num);
-    if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT)
+    char *endptr;
+    unsigned long bootNumber = strtoul(num, &endptr, 10);
+    if (bootNumber < 1 || bootNumber > MAX_IMAGECOUNT || *endptr != '\0')
     {
         printUsage();
         return 0;
     }
-    return bootNumber;
+    return (unsigned int)bootNumber;
 }
 
 // p /dev/sdc /home/vagrant/amboot/list.txt
