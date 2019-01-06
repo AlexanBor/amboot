@@ -476,20 +476,12 @@ class ImageList
 {
 public:
     ImageList(const char *listFileName);
-    ~ImageList()
-    {
-        clear();
-    }
-    list <ImageReader *> &items()
+    list<unique_ptr<ImageReader>> &items()
     {
         return images;
     }
     void clear()
     {
-        for (auto image : images)
-        {
-            delete image;
-        }
         images.clear();
     }
     err::status error() const
@@ -497,7 +489,7 @@ public:
         return statusError;
     }
 private:
-    list <ImageReader *>images;
+    list<unique_ptr<ImageReader>> images;
     err::status statusError;
 };
 ImageList::ImageList(const char *listFileName):
@@ -563,13 +555,13 @@ ImageList::ImageList(const char *listFileName):
 #if 0 // #ifndef NDEBUG
             cout << "Info:" << lineNumber << ":" << size << " <<" << name << ">>" << endl;
 #endif
-            auto reader = new ImageReader(size, name);
+            unique_ptr<ImageReader> reader(new ImageReader(size, name));
             if ((statusError = reader->error()))
             {
-                delete reader;
+                // delete reader;
                 break;
             }
-            images.push_back(reader);
+            images.push_back(move(reader));
         }
         if (images.size() == 0)
         {
@@ -613,7 +605,7 @@ err::status performBuild(const char *dstDevice, const char *listFileName, bool p
 
     { // Check there is enough space on dst drive for all extended images and MBS
         int requiredGiB = 0;
-        for (auto reader : imageList.items())
+        for (auto &reader : imageList.items())
         {
             requiredGiB += reader->getSizeGiB();
         }
@@ -625,7 +617,7 @@ err::status performBuild(const char *dstDevice, const char *listFileName, bool p
         }
     }
 
-    for (auto reader: imageList.items())
+    for (auto &reader: imageList.items())
     {
         statusError = w.write(reader->getStream(), reader->getName(), reader->getSizeGiB());
         if (statusError)
