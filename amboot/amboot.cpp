@@ -739,7 +739,7 @@ int main(int argc, char **argv)
             printUsage();
             return err::cmdLine;
         }
-        bootNumber = atoi(argv[3]);
+        bootNumber = getBootNumber(argv[3]);
         if (bootNumber < 1)
         {
             return err::cmdLine;
