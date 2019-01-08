@@ -14,7 +14,7 @@ constexpr unsigned int BYTES_TO_SECTORS = 9;//  SECTOR_SIZE = 2**9
 constexpr unsigned int BUFFER_SIZE = 1024 * 1024; // 1 Mibi byte
 constexpr unsigned int SECTORS_PER_GiB = 1024 * 1024 * 1024 / SECTOR_SIZE;
 constexpr uint8_t MAGIC_XBR = 0x42;
-constexpr int16_t MAGIC_MBR = (int16_t)0xAA55;
+constexpr uint16_t MAGIC_MBR = (uint16_t)0xAA55;
 
 #pragma pack(push, 1)
 //{
