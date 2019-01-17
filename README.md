@@ -15,7 +15,7 @@ Fetch and unpack required images to any system with this utility. Edit supplied 
 
 Run utility in preview mode to check space usage, drive availability etc. Then run in build mode.
 
-Run noexpand.sh script to instruct OSes in images written to not expand partitions. This step is mandatory, else each image on first boot will expand itself to whole drive and thus will destroy its neighbors.
+Run noexpand.sh script to instruct OSes in images written to not expand partitions. This step is mandatory, otherwise each image on its first boot will expand itself to whole drive and thus will destroy its neighbors.
 
 Now you can attach drive to TV-box and boot it. Boot process explained in https://github.com/150balbes/Amlogic_s905/wiki/s905_multi_boot.
 
